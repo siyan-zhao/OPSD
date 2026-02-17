@@ -1,0 +1,30 @@
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 accelerate launch \
+    --config_file accelerate.yaml \
+    --num_processes 8 \
+    --gradient_accumulation_steps 4 \
+    --main_process_port 19346 \
+    grpo_train.py \
+    --learning_rate 2e-5 \
+    --per_device_train_batch_size 1 \
+    --gradient_accumulation_steps 4 \
+    --model_name_or_path /data0/shared/Qwen3-4B \
+    --output_dir /data0/siyanz/grpo/ \
+    --run_config qwen4b-2epoch \
+    --num_train_epochs 2 \
+    --gradient_checkpointing \
+    --lora_r 64 \
+    --lora_alpha 128 \
+    --lora_target_modules q_proj k_proj v_proj o_proj gate_proj up_proj down_proj \
+    --max_prompt_length 2048 \
+    --max_completion_length 16000 \
+    --num_generations 8 \
+    --temperature 1.2 \
+    --use_vllm \
+    --use_peft \
+    --vllm_mode colocate \
+    --logging_steps 10 \
+    --save_steps 50 \
+    --beta 0.0 \
+    --loss_type grpo \
+    --scale_rewards group \
+    --wandb_project OPSD

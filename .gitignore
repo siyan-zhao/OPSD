@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Environments
+.env
+.venv
+env/
+venv/
+
+# Training outputs
+wandb/
+outputs/
+checkpoints/
+runs/
+logs/
+
+# OS
+.DS_Store
