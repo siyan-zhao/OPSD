@@ -1,0 +1,35 @@
+accelerate launch \
+    --config_file accelerate.yaml \
+    --num_processes 8 \
+    --gradient_accumulation_steps 4 \
+    --main_process_port 12949 \
+    opsd_train.py \
+    --model_name_or_path /data0/shared/Qwen3-4B \
+    --learning_rate 2e-5 \
+    --per_device_train_batch_size 1 \
+    --gradient_checkpointing \
+    --gradient_accumulation_steps 4 \
+    --output_dir  /data0/siyanz/opsd/ \
+    --run_config qwen34b_gen2048_fixteacher_temp12_lr2e5 \
+    --num_train_epochs 30 \
+    --max_completion_length 2048 \
+    --save_steps 50 \
+    --logging_steps 2 \
+    --attn_implementation flash_attention_2 \
+    --torch_dtype bfloat16 \
+    --max_length 20000 \
+    --beta 0.5 \
+    --use_vllm \
+    --vllm_mode colocate \
+    --vllm_gpu_memory_utilization 0.6 \
+    --vllm_tensor_parallel_size 1 \
+    --use_peft \
+    --lora_r 64 \
+    --lora_alpha 128 \
+    --lora_target_modules q_proj k_proj v_proj o_proj gate_proj up_proj down_proj \
+    --temperature 1.2 \
+    --top_p 0.95 \
+    --top_k 20 \
+    --fixed_teacher \
+    --wandb_entity zsyucla \
+    --wandb_project OPSD
