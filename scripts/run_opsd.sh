@@ -1,27 +1,27 @@
 accelerate launch \
     --config_file accelerate.yaml \
-    --num_processes 8 \
+    --num_processes 2 \
     --gradient_accumulation_steps 4 \
     --main_process_port 12949 \
     opsd_train.py \
-    --model_name_or_path /data0/shared/Qwen3-4B \
+    --model_name_or_path Qwen/Qwen3-4B-Instruct-2507 \
     --learning_rate 2e-5 \
     --per_device_train_batch_size 1 \
     --gradient_checkpointing \
     --gradient_accumulation_steps 4 \
-    --output_dir  /data0/siyanz/opsd/ \
+    --output_dir  /data/user_data/kailashr/opsd/ \
     --run_config qwen34b_gen2048_fixteacher_temp12_lr2e5 \
     --num_train_epochs 30 \
     --max_completion_length 2048 \
     --save_steps 50 \
     --logging_steps 2 \
-    --attn_implementation flash_attention_2 \
+    --attn_implementation sdpa \
     --torch_dtype bfloat16 \
     --max_length 20000 \
     --beta 0.5 \
     --use_vllm \
     --vllm_mode colocate \
-    --vllm_gpu_memory_utilization 0.6 \
+    --vllm_gpu_memory_utilization 0.3 \
     --vllm_tensor_parallel_size 1 \
     --use_peft \
     --lora_r 64 \
@@ -31,5 +31,5 @@ accelerate launch \
     --top_p 0.95 \
     --top_k 20 \
     --fixed_teacher \
-    --wandb_entity zsyucla \
-    --wandb_project OPSD
+    --wandb_project OPSD \
+    --aime_eval_every_n_epochs 10

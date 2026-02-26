@@ -1,8 +1,10 @@
 import os
+import re
 import wandb
 
 from datasets import load_dataset
 from transformers import AutoTokenizer, GenerationConfig
+from transformers import TrainerCallback, TrainerState, TrainerControl
 
 from trl import (
     LogCompletionsCallback,
@@ -84,6 +86,71 @@ class CustomScriptArguments(ScriptArguments):
             "Typical range: 0.99–0.9999. Only used when use_ema_teacher=True."
         },
     )
+    aime_eval_every_n_epochs: int = field(
+        default=10,
+        metadata={"help": "Evaluate on AIME 2024 every N epochs. Set to 0 to disable."},
+    )
+
+
+class AIMEEvalCallback(TrainerCallback):
+    def __init__(self, trainer, tokenizer, eval_every_n_epochs=10, num_problems=15):
+        self.trainer = trainer
+        self.tokenizer = tokenizer
+        self.eval_every_n_epochs = eval_every_n_epochs
+        ds = load_dataset("AI-MO/aimo-validation-aime", split="train").select(range(num_problems))
+        self.problems = ds["problem"]
+        self.answers = [int(a) for a in ds["answer"]]
+
+    def _extract_answer(self, text):
+        matches = re.findall(r"\\boxed\{(\d+)\}", text)
+        if matches:
+            return int(matches[-1]) % 1000
+        return None
+
+    def _run_eval(self, args, state: TrainerState, label: str):
+        
+        
+        if self.trainer.use_vllm:
+            self.trainer._move_model_to_vllm()
+
+        if args.process_index != 0:
+            return
+
+        from vllm import SamplingParams
+
+        prompts = []
+        for problem in self.problems:
+            messages = [{"role": "user", "content": problem}]
+            prompt = self.tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+            prompts.append(prompt)
+
+        outputs = self.trainer.vllm_engine.generate(
+            prompts, SamplingParams(temperature=0.0, max_tokens=4096)
+        )
+
+        correct = 0
+        for output, true_ans in zip(outputs, self.answers):
+            pred = self._extract_answer(output.outputs[0].text)
+            if pred is not None and pred == true_ans:
+                correct += 1
+
+        accuracy = correct / len(self.answers)
+        print(f"\nAIME 2024 {label}: {correct}/{len(self.answers)} = {accuracy:.1%}\n")
+        if wandb.run is not None:
+            wandb.log(
+                {"eval/aime24_accuracy": accuracy, "eval/aime24_correct": correct},
+                step=state.global_step,
+            )
+
+    def on_train_begin(self, args, state: TrainerState, control: TrainerControl, **kwargs):
+        self._run_eval(args, state, label="@ start (step 0)")
+
+    def on_epoch_end(self, args, state: TrainerState, control: TrainerControl, **kwargs):
+        if int(state.epoch) % self.eval_every_n_epochs != 0:
+            return
+        self._run_eval(args, state, label=f"@ epoch {int(state.epoch)}")
 
 
 if __name__ == "__main__":
@@ -258,6 +325,11 @@ if __name__ == "__main__":
         use_ema_teacher=script_args.use_ema_teacher,
         ema_decay=script_args.ema_decay,
     )
+
+    if training_args.use_vllm and script_args.aime_eval_every_n_epochs > 0:
+        trainer.add_callback(
+            AIMEEvalCallback(trainer, tokenizer, eval_every_n_epochs=script_args.aime_eval_every_n_epochs)
+        )
 
     trainer.train()
 
