@@ -105,7 +105,7 @@ See [`scripts/run_sft.sh`](scripts/run_sft.sh).
 See [`scripts/run_grpo.sh`](scripts/run_grpo.sh).
 
 ### Implementation Note
-Thanks to [issue #3](https://github.com/siyan-zhao/OPSD/issues/3), we identified an unintentional prompt format mismatch: the student prompt lacks the Qwen3 chat template, while the teacher prompt follows the Qwen3 thinking-style chat template. The reported results correspond to this configuration, so we didn't fix the mismatch but only document it here for reproducibility — OPSD does not require student and teacher prompts to match, and both can be treated as optimizable components of the framework. We are experimenting with matched/unmatched/hybrid chat templates and will show comparison results in the future.
+Thanks to [issue #3](https://github.com/siyan-zhao/OPSD/issues/3), we identified an unintentional prompt format mismatch: the student prompt lacks the Qwen3 chat template, while the teacher prompt follows the Qwen3 thinking-style chat template. The reported results correspond to this configuration, so we didn't fix the mismatch but only document it here for reproducibility — OPSD does not require student and teacher prompts to match, and both can be treated as optimizable components of the framework. For instance, the teacher prompt can be refined via prompt optimization techniques such as GEPA~\citep{agrawal2025gepareflectivepromptevolution} to shape the supervising signal, while the student prompt can be varied to study which generation modes yield the most effective learning. We are experimenting with matched/unmatched/hybrid chat templates and will show comparison results in the future.
 
 ## Citation
 
