@@ -1,8 +1,10 @@
 # Self-Distilled Reasoner: On-Policy Self-Distillation for Large Language Models
 
 
-[![Paper](https://img.shields.io/badge/arXiv-2601.18734-b31b1b.svg)](https://arxiv.org/abs/2601.18734)
-[![Blog](https://img.shields.io/badge/Blog-Post-blue.svg)](https://siyan-zhao.github.io/blog/2026/opsd/)
+<p align="center">
+<a href="https://arxiv.org/abs/2601.18734"><img src="https://img.shields.io/badge/arXiv-2601.18734-b31b1b.svg"></a>
+<a href="https://siyan-zhao.github.io/blog/2026/opsd/"><img src="https://img.shields.io/badge/Blog-Post-blue.svg"></a>
+</p>
 
 ---
 ## Overview
