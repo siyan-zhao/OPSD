@@ -2,16 +2,22 @@
 
 
 [![Paper](https://img.shields.io/badge/arXiv-2601.18734-b31b1b.svg)](https://arxiv.org/abs/2601.18734)
+[![Blog](https://img.shields.io/badge/Blog-Post-blue.svg)](https://siyan-zhao.github.io/blog/2026/opsd/)
 
 ---
+## Overview
+
+**On-Policy Self-Distillation (OPSD)** trains a single model to act as both student and teacher by conditioning on different contexts — the student sees only the problem, while the teacher additionally sees the ground-truth solution — and performs token-level distribution matching along the student's own on-policy trajectories.
+
+OPSD achieves comparable or better performance while using 8-12× fewer generation tokens than GRPO (1k tokens vs 16k tokens.)
+
+<img src="assets/opsd_perf.png" width="60%">
 
 ## Updates
 
 - **Mar 5, 2026**: We fully opensourced our code with evaluation code released (`eval/`); environment configs updated.
 
-## Overview
 
-This repository contains the training code for **On-Policy Self-Distillation (OPSD)**, along with SFT and GRPO baselines used in our experiments. OPSD trains a single model to act as both student and teacher by conditioning on different contexts — the student sees only the problem, while the teacher additionally sees the ground-truth solution — and performs token-level distribution matching along the student's own on-policy trajectories.
 
 
 ## Installation
