@@ -11,7 +11,7 @@
 
 OPSD achieves comparable or better performance while using 8-12× fewer generation tokens than GRPO (1k tokens vs 16k tokens.)
 
-<img src="assets/opsd_perf.png" width="60%">
+<p align="center"><img src="assets/opsd_perf.png" width="80%"></p>
 
 ## Updates
 
