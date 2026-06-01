@@ -56,12 +56,16 @@ class SelfDistillationDataCollator:
         student_prompts = []
         teacher_prompts = []
         teacher_reasoning_prompts = []  # NEW: for reason_first mode
+        problems = []  # NEW: pass through for sample-level logging
+        solutions = []  # NEW: pass through for sample-level logging
 
         for feature in features:
             # Extract problem and solution from dataset
             # Handle different possible column names
             problem = feature["problem"]
             solution = feature["solution"]
+            problems.append(problem)
+            solutions.append(solution)
 
             # Student prompt: just the problem with instruction (matching evaluation format)
             student_user_message = f"Problem: {problem}\n\nPlease reason step by step, and put your final answer within \\boxed{{}}."
@@ -136,6 +140,9 @@ class SelfDistillationDataCollator:
             "student_prompt_length": max_student_prompt_len,  # Single value for batch!
             # Keep individual lengths for proper masking
             "student_prompt_lengths_per_example": torch.tensor(student_prompt_lengths),
+            # NEW: non-tensor list[str] passthrough for sample-level logging
+            "problem": problems,
+            "solution": solutions,
         }
 
         if self.reason_first:

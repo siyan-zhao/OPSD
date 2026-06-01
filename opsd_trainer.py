@@ -64,6 +64,72 @@ from trl.experimental.gold.gold_config import GOLDConfig
 from data_collator import SelfDistillationDataCollator
 
 
+def _extract_boxed_answer(text):
+    """Extract the last \\boxed{} answer from text. None-safe.
+
+    Copied from eval/evaluate_math.py:extract_boxed_answer (that module imports
+    vllm at the top, so we duplicate the logic here instead of importing it).
+    """
+    if text is None:
+        return None
+
+    idx = text.rfind("\\boxed")
+    if idx < 0:
+        return None
+
+    i = idx
+    num_left_braces = 0
+    right_brace_idx = None
+
+    while i < len(text):
+        if text[i] == "{":
+            num_left_braces += 1
+        if text[i] == "}":
+            num_left_braces -= 1
+            if num_left_braces == 0:
+                right_brace_idx = i
+                break
+        i += 1
+
+    if right_brace_idx is None:
+        return None
+
+    boxed_str = text[idx : right_brace_idx + 1]
+
+    if boxed_str.startswith("\\boxed{") and boxed_str.endswith("}"):
+        answer = boxed_str[7:-1]
+        return answer.strip()
+
+    return None
+
+
+def _grade_answer(predicted, ground_truth):
+    """Grade predicted vs ground_truth using math_verify, with string fallback.
+
+    Copied from eval/evaluate_math.py:grade_answer. math_verify is imported
+    lazily so importing this trainer never requires it.
+    """
+    if predicted is None:
+        return False
+
+    try:
+        from math_verify import parse, verify
+
+        if not "$" in predicted:
+            predicted = f"${predicted}$"
+        if not "$" in ground_truth:
+            ground_truth = f"${ground_truth}$"
+
+        pred_parsed = parse(predicted, fallback_mode="no_fallback")
+        gt_parsed = parse(ground_truth, fallback_mode="no_fallback")
+
+        return verify(gt_parsed, pred_parsed, timeout_seconds=5)
+    except Exception:
+        pred_norm = predicted.replace("$", "").replace(" ", "").lower().strip()
+        gt_norm = ground_truth.replace("$", "").replace(" ", "").lower().strip()
+        return pred_norm == gt_norm
+
+
 if is_peft_available():
     from peft import PeftConfig
 
@@ -1267,6 +1333,16 @@ class OPSDTrainer(SFTTrainer):
         # Save to JSON file
         output_file = generations_dir / f"generations_step_{step}.json"
 
+        # Grade each buffered entry (done at save time: every N steps, main process
+        # only, math_verify imported lazily — not on the training hot path).
+        for entry in self._generation_outputs_buffer:
+            gt = _extract_boxed_answer(entry.get("solution"))
+            pred = _extract_boxed_answer(entry.get("student_completion"))
+            entry["gt_answer"] = gt
+            entry["predicted_answer"] = pred
+            entry["correct"] = _grade_answer(pred, gt) if gt is not None else None
+            # entry.pop("solution", None)  # uncomment to drop the verbose reference solution
+
         output_data = {
             "step": step,
             "num_samples": len(self._generation_outputs_buffer),
@@ -1324,6 +1400,7 @@ class OPSDTrainer(SFTTrainer):
                 reasoning_texts = self.processing_class.batch_decode(
                     reasoning_completions, skip_special_tokens=True
                 )
+                self._last_reasoning_texts = reasoning_texts  # for sample-level logging
 
                 # Occasionally print reasoning
                 if random.random() < 0.01:
@@ -1422,10 +1499,21 @@ class OPSDTrainer(SFTTrainer):
         self._textual_logs["prompt"].extend(gather_object(prompt_texts))
         self._textual_logs["completion"].extend(gather_object(completion_texts))
 
-        # Collect generation outputs for saving
-        for prompt, completion in zip(prompt_texts, completion_texts):
+        # Collect generation outputs for saving (enriched for sample-level analysis)
+        problems = inputs.get("problem", [None] * len(completion_texts))
+        solutions = inputs.get("solution", [None] * len(completion_texts))
+        reasonings = getattr(self, "_last_reasoning_texts", None)
+        for i, (prompt, completion) in enumerate(zip(prompt_texts, completion_texts)):
             self._generation_outputs_buffer.append(
-                {"step": self.state.global_step, "prompt": prompt, "completion": completion}
+                {
+                    "step": self.state.global_step,
+                    "problem": problems[i] if i < len(problems) else None,
+                    "solution": solutions[i] if i < len(solutions) else None,
+                    "teacher_reasoning": reasonings[i]
+                    if reasonings is not None and i < len(reasonings)
+                    else None,
+                    "student_completion": completion,
+                }
             )
 
         # Occasionally print student's generation with 1% probability
