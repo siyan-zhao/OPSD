@@ -296,6 +296,50 @@ See [`scripts/run_sft.sh`](scripts/run_sft.sh).
 
 See [`scripts/run_grpo.sh`](scripts/run_grpo.sh).
 
+## 样本级 reflection + 正确性日志（fork 新增功能）
+
+> 此功能为本 fork 在 `reason-first-logging` 分支新增,用于做样本级分析:把每条训练样本的**题目、teacher 的 reflection 讲解、student 的 rollout,以及这道题学生做对没做对**都写进日志,方便分析 reflection 质量和正确性之间的关系。原仓库的日志只有 `{step, prompt, completion}`,既没有 reflection 也没有任何正确性信息。
+
+### 怎么跑
+
+**必须带 `--reason_first True`**,否则不会触发 teacher 的 reflection 路径,日志里 `teacher_reasoning` 会全是 `null`:
+
+```bash
+bash scripts/run_opsd_1b.sh --reason_first True --run_config reason_first_v1
+```
+
+### 日志在哪、长什么样
+
+训练时每 5 步(仅主进程)写一个文件:`<output_dir>/generations/generations_step_{N}.json`。里面每条样本:
+
+```json
+{
+  "step": 50,
+  "problem": "……题目……",
+  "solution": "……数据集里的参考解答(默认保留,见下方说明)……",
+  "teacher_reasoning": "……teacher 对参考解答的讲解(reflection)……",
+  "student_completion": "……学生这一步的 rollout……",
+  "gt_answer": "42",
+  "predicted_answer": "42",
+  "correct": true
+}
+```
+
+字段说明:
+- `gt_answer`:从数据集 `solution` 里抽出的 `\boxed{}` 答案。
+- `predicted_answer`:从 `student_completion` 里抽出的 `\boxed{}` 答案。
+- `correct`:用 `math_verify` 判 `predicted_answer` 与 `gt_answer` 是否等价;`gt_answer` 为 `None` 时该字段为 `null`。
+- 判分在**存盘时**才算(每 5 步、仅主进程、`math_verify` 惰性 import),不在训练热路径上,不拖慢训练。
+
+### 第一次跑务必核对两点
+
+1. **索引对齐**:日志里 `problem` 和 `student_completion` 必须是**同一道题**。日志按本进程本地下标对齐,若用 vLLM 且 `tensor_parallel_size > 1`,生成阶段有跨 TP group 的 gather/slice——先跑很少的步数,打开生成的 JSON 肉眼确认对齐,再正式开跑。
+2. **`gt_answer` 抽取依赖 `\boxed{}`**:`gt_answer` 来自数据集 `solution` 字段里的 `\boxed{}`。如果你用的数据集 `solution` 没有 `\boxed{}`,那么 `gt_answer`/`correct` 会全是 `null`——这时需要把 `opsd_trainer.py` 里 `_extract_boxed_answer(entry.get("solution"))` 改成指向数据集真正的答案字段。为方便排查,日志里**默认保留了 `solution` 原文**(`opsd_trainer.py` 的 `_save_generation_outputs` 里有一行被注释掉的 `entry.pop("solution", None)`,确认无误后取消注释即可让日志更精简)。
+
+### 解读时注意
+
+`--reason_first` 的 prompt 明确要求 teacher **只讲解参考解答、不要自己重新解题**。所以 `teacher_reasoning` 反映的是"对一个已知正确答案的讲解质量",而**不是** teacher 独立解题的能力——分析时别把它当成独立解题水平。
+
 ### Acknowledgements
 Our implementation builds on [TRL GOLD Trainer](https://huggingface.co/docs/trl/gold_trainer). We sincerely thank [@simran135](https://github.com/simran135) and [@beanie00](https://github.com/beanie00) for identifying the prompt template bugs and the zero-2 issue, respectively!
 
