@@ -1,0 +1,42 @@
+accelerate launch \
+    --config_file accelerate.yaml \
+    --num_processes 4 \
+    --gradient_accumulation_steps 2 \
+    --main_process_port 19348 \
+    rlsd_train.py \
+    --model_name_or_path /data0/shared/Qwen3-1.7B \
+    --learning_rate 5e-6 \
+    --max_grad_norm 0.1 \
+    --per_device_train_batch_size 4 \
+    --gradient_checkpointing \
+    --gradient_accumulation_steps 2 \
+    --output_dir /data0/siyanz/rlsd/ \
+    --run_config qwen31b_gen1024_lambda05_eps02 \
+    --num_train_epochs 2 \
+    --num_iterations 2 \
+    --max_prompt_length 2048 \
+    --max_completion_length 1024 \
+    --num_generations 8 \
+    --temperature 1.1 \
+    --top_p 0.95 \
+    --top_k 20 \
+    --use_vllm \
+    --vllm_mode colocate \
+    --vllm_gpu_memory_utilization 0.6 \
+    --vllm_tensor_parallel_size 1 \
+    --use_peft \
+    --lora_r 64 \
+    --lora_alpha 128 \
+    --lora_target_modules q_proj k_proj v_proj o_proj gate_proj up_proj down_proj \
+    --save_steps 25 \
+    --logging_steps 2 \
+    --attn_implementation flash_attention_2 \
+    --torch_dtype bfloat16 \
+    --beta 0.0 \
+    --loss_type grpo \
+    --scale_rewards group \
+    --rlsd_lambda 0.5 \
+    --rlsd_lambda_decay_steps 50 \
+    --rlsd_epsilon_w 0.2 \
+    --teacher_max_prompt_length 4096 \
+    --wandb_project RLSD
