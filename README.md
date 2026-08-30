@@ -71,6 +71,8 @@ bash run_eval.sh
 
 ### Evaluation Results across Tasks on Qwen3-1.7B
 
+## Thinking Mode Eval:
+
 <div align="center">
 <table>
 <tr>
@@ -117,6 +119,8 @@ bash run_eval.sh
 </div>
 
 > **Evaluation settings:** temperature=1.0, thinking mode enabled, max new tokens=38912, top-p=none, top-k disabled, min-p=0, presence penalty=0, num samples=12
+
+**Reproducibility note:** The results above report Avg@12 using a single seed run, so some variation across runs is expected. We acknowledge that multi-seed evaluation should be adopted and more reliable. For reference, the authors of [OP²SD](https://github.com/MBZUAI-reasoninglab/OP2SD#results-snapshot) have independently evaluated OPSD across 4 decoding seeds; their results may serve as a helpful reference.
 
 
 ## Non-Thinking Mode
