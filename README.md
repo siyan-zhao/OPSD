@@ -58,6 +58,9 @@ The code uses `trl`'s experimental GOLD trainer as a base.
 
 ## Quick Start
 
+For the Qwen3.5 2B LoRA setup on 4x RTX 5090 with DeepSpeed and W&B, see
+[docs/qwen35_5090_training.md](docs/qwen35_5090_training.md).
+
 Reproduce results on Qwen3-1.7B (🚀 training only takes **~15 minutes** on 4×H100 and peaks within 100 steps):
 
 ```bash

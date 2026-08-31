@@ -144,12 +144,44 @@ class OPSDTrainer(SFTTrainer):
         ema_decay: float = 0.999,
         student_thinking: bool = False,
         teacher_thinking: bool = True,
+        close_teacher_thinking_before_scoring: bool = False,
+        reapply_chat_template_to_input: bool = True,
+        problem_field: str = "problem",
+        solution_field: str = "solution",
+        input_field: str = "input",
+        output_field: str = "output",
+        draft_field: str = "sft_draft",
+        corrector_mode: bool = False,
+        teacher_draft_field: str = "",
+        opsd_loss_weight: float = 1.0,
+        sft_loss_weight: float = 0.0,
+        teacher_guidance_mode: str = "exact",
     ):
-        self.model_name_or_path = model if isinstance(model, str) else model.config._name_or_path
+        self.model_name_or_path = (
+            model
+            if isinstance(model, str)
+            else getattr(model.config, "_name_or_path", None) or getattr(model, "name_or_path", None)
+        )
+        self.problem_field = problem_field
+        self.solution_field = solution_field
+        self.input_field = input_field
+        self.output_field = output_field
+        self.draft_field = draft_field
+        self.corrector_mode = corrector_mode
+        self.teacher_draft_field = teacher_draft_field
         self.model_revision = getattr(args, "student_model_revision", None)
         if isinstance(model, str) and self.model_revision is not None:
             args.model_init_kwargs = args.model_init_kwargs or {}
             args.model_init_kwargs.setdefault("revision", self.model_revision)
+
+        # OPSD builds student/teacher inputs in the custom collator from raw
+        # problem/solution or input/output columns, so TRL's default SFT text
+        # tokenization would look for a "text" column and break this dataset.
+        if hasattr(args, "dataset_kwargs"):
+            args.dataset_kwargs = dict(args.dataset_kwargs or {})
+            args.dataset_kwargs["skip_prepare_dataset"] = True
+        if hasattr(args, "remove_unused_columns"):
+            args.remove_unused_columns = False
 
         # Custom data collator for self-distillation
         if data_collator is None:
@@ -159,6 +191,16 @@ class OPSDTrainer(SFTTrainer):
                 reason_first=reason_first,
                 student_thinking=student_thinking,
                 teacher_thinking=teacher_thinking,
+                close_teacher_thinking_before_scoring=close_teacher_thinking_before_scoring,
+                reapply_chat_template_to_input=reapply_chat_template_to_input,
+                problem_field=problem_field,
+                solution_field=solution_field,
+                input_field=input_field,
+                output_field=output_field,
+                draft_field=draft_field,
+                corrector_mode=corrector_mode,
+                teacher_draft_field=teacher_draft_field,
+                teacher_guidance_mode=teacher_guidance_mode,
             )
 
         super().__init__(
@@ -190,7 +232,14 @@ class OPSDTrainer(SFTTrainer):
         self.jsd_token_clip = jsd_token_clip
         self.use_ema_teacher = use_ema_teacher
         self.ema_decay = ema_decay
+        self.opsd_loss_weight = opsd_loss_weight
+        self.sft_loss_weight = sft_loss_weight
         self._ema_params = None  # lazily initialized on first optimizer step
+
+        if self.opsd_loss_weight < 0 or self.sft_loss_weight < 0:
+            raise ValueError("opsd_loss_weight and sft_loss_weight must be non-negative.")
+        if self.opsd_loss_weight == 0 and self.sft_loss_weight == 0:
+            raise ValueError("At least one of opsd_loss_weight or sft_loss_weight must be greater than 0.")
 
         # Validate fixed_teacher option
         if self.fixed_teacher and peft_config is None:
@@ -219,6 +268,16 @@ class OPSDTrainer(SFTTrainer):
             print("Teacher will use the initial policy (base model without LoRA adapters)")
             print("Student will update with LoRA adapters")
             print(f"{'='*80}\n")
+
+        print(f"\n{'='*80}")
+        print("LOSS MIXING")
+        print(f"OPSD loss weight: {self.opsd_loss_weight}")
+        print(f"SFT loss weight: {self.sft_loss_weight}")
+        print(f"Corrector mode: {self.corrector_mode}")
+        if self.corrector_mode:
+            print(f"Draft field: {self.draft_field}")
+        print(f"Teacher draft field: {self.teacher_draft_field or '<disabled>'}")
+        print(f"{'='*80}\n")
 
         if self.reason_first:
             print(f"\n{'='*80}")
@@ -368,8 +427,10 @@ class OPSDTrainer(SFTTrainer):
     def _set_signature_columns_if_needed(self):
         super()._set_signature_columns_if_needed()
         required_columns = [
-            "problem",
-            "solution",
+            self.problem_field,
+            self.solution_field,
+            self.input_field,
+            self.output_field,
         ]
         if self._signature_columns is None:
             self._signature_columns = required_columns
@@ -723,7 +784,7 @@ class OPSDTrainer(SFTTrainer):
 
             # Policy gradient loss: -advantage * log π_student
             # Negative because we minimize loss (gradient descent), but want to maximize reward
-            loss = -(advantage * student_log_probs_sampled_masked).mean()
+            opsd_loss = -(advantage * student_log_probs_sampled_masked).mean()
 
             del (
                 student_log_probs_sampled,
@@ -733,7 +794,7 @@ class OPSDTrainer(SFTTrainer):
             )
         else:
             # Temperature is applied inside generalized_jsd_loss
-            loss = self.generalized_jsd_loss(
+            opsd_loss = self.generalized_jsd_loss(
                 student_logits=student_logits_for_loss,
                 teacher_logits=teacher_logits_for_loss,
                 labels=shifted_labels,
@@ -743,6 +804,41 @@ class OPSDTrainer(SFTTrainer):
                 token_clip=self.jsd_token_clip,
             )
             del student_logits_for_loss, teacher_logits_for_loss
+
+        sft_loss = None
+        if self.sft_loss_weight > 0:
+            required_sft_keys = {"sft_input_ids", "sft_attention_mask", "sft_labels"}
+            missing_sft_keys = required_sft_keys.difference(inputs)
+            if missing_sft_keys:
+                missing = ", ".join(sorted(missing_sft_keys))
+                raise KeyError(f"sft_loss_weight > 0 but SFT tensors are missing from the batch: {missing}")
+
+            outputs_sft = model(
+                input_ids=inputs["sft_input_ids"],
+                attention_mask=inputs["sft_attention_mask"],
+            )
+            sft_logits = outputs_sft.logits[:, :-1, :].contiguous()
+            sft_labels = inputs["sft_labels"][:, 1:].contiguous()
+            sft_loss = F.cross_entropy(
+                sft_logits.view(-1, sft_logits.size(-1)),
+                sft_labels.view(-1),
+                ignore_index=-100,
+            )
+            del outputs_sft, sft_logits, sft_labels
+
+        loss = self.opsd_loss_weight * opsd_loss
+        if sft_loss is not None:
+            loss = loss + self.sft_loss_weight * sft_loss
+
+        mode = "train" if model.training else "eval"
+        self._metrics[mode]["opsd_loss"].append(float(opsd_loss.detach()))
+        if sft_loss is not None:
+            self._metrics[mode]["sft_loss"].append(float(sft_loss.detach()))
+        self._metrics[mode]["mixed_loss"].append(float(loss.detach()))
+
+        del opsd_loss
+        if sft_loss is not None:
+            del sft_loss
 
         empty_cache()
 
@@ -1413,8 +1509,21 @@ class OPSDTrainer(SFTTrainer):
             actual_prompt_len = inputs["student_prompt_lengths_per_example"][i].item()
             labels[i, :actual_prompt_len] = -100  # Mask actual prompt
 
-        if self.processing_class.pad_token_id is not None:
-            labels[labels == self.processing_class.pad_token_id] = -100
+        pad_token_id = self.processing_class.pad_token_id
+        eos_token_id = self.processing_class.eos_token_id
+        if pad_token_id is not None:
+            if eos_token_id is not None and pad_token_id == eos_token_id:
+                # Qwen-style tokenizers often use the same id for padding and end-of-message.
+                # Keep the first generated EOS token as a learnable stop target, and mask
+                # only later EOS/pad tokens.
+                for i in range(labels.shape[0]):
+                    eos_positions = (labels[i, student_prompt_len:] == eos_token_id).nonzero(as_tuple=False)
+                    if eos_positions.numel() == 0:
+                        continue
+                    first_eos = student_prompt_len + eos_positions[0].item()
+                    labels[i, first_eos + 1 :] = -100
+            else:
+                labels[labels == pad_token_id] = -100
 
         inputs["labels"] = labels
 

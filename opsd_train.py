@@ -5,7 +5,6 @@ from datasets import load_dataset
 from transformers import AutoTokenizer, GenerationConfig
 
 from trl import (
-    LogCompletionsCallback,
     ModelConfig,
     ScriptArguments,
     TrlParser,
@@ -106,6 +105,184 @@ class CustomScriptArguments(ScriptArguments):
             "Default True. Set to False for the matched non-thinking ablation (both nonthink)."
         },
     )
+    close_teacher_thinking_before_scoring: bool = field(
+        default=False,
+        metadata={
+            "help": "If teacher_thinking=True, append a teacher-only hidden thought closure before "
+            "student tokens are scored. This keeps teacher thinking enabled while aligning the "
+            "scoring position with the student's final-answer region."
+        },
+    )
+    reapply_chat_template_to_input: bool = field(
+        default=True,
+        metadata={
+            "help": "For input/output datasets, extract the user content and apply the current tokenizer's "
+            "chat template instead of using an older pre-templated input verbatim."
+        },
+    )
+    model_loader: str = field(
+        default="auto",
+        metadata={
+            "help": "Model auto-loader to use. Choose from: auto, causal_lm, image_text_to_text. "
+            "Qwen3.5-2B uses a multimodal ForConditionalGeneration architecture, so auto will "
+            "prefer AutoModelForImageTextToText when a vision_config is present."
+        },
+    )
+    opsd_dataset: str = field(
+        default="siyanzhao/Openthoughts_math_30k_opsd",
+        metadata={
+            "help": "Training dataset name or local path. Supports Hugging Face dataset names, "
+            "local dataset directories, and local .json/.jsonl/.csv files."
+        },
+    )
+    opsd_dataset_split: str = field(
+        default="train",
+        metadata={"help": "Dataset split to load."},
+    )
+    problem_field: str = field(
+        default="problem",
+        metadata={"help": "Problem field for math-style datasets."},
+    )
+    solution_field: str = field(
+        default="solution",
+        metadata={"help": "Solution field for math-style datasets."},
+    )
+    input_field: str = field(
+        default="input",
+        metadata={"help": "Prompt field for SFT-style datasets."},
+    )
+    output_field: str = field(
+        default="output",
+        metadata={"help": "Reference response field for SFT-style datasets."},
+    )
+    draft_field: str = field(
+        default="sft_draft",
+        metadata={"help": "Draft summary field for corrector-style datasets."},
+    )
+    corrector_mode: bool = field(
+        default=False,
+        metadata={
+            "help": "Train OPSD/SFT as a summary corrector using input + draft_field -> output. "
+            "When enabled, each input/output sample must also contain draft_field."
+        },
+    )
+    teacher_draft_field: str = field(
+        default="",
+        metadata={
+            "help": "Optional SFT draft field shown only to the teacher as a private baseline. "
+            "The student still sees only input unless corrector_mode=True."
+        },
+    )
+    teacher_guidance_mode: str = field(
+        default="exact",
+        metadata={
+            "help": "Teacher prompt style for input/output datasets. "
+            "Use 'exact' to prefer the reference wording, or 'quality' to use the reference as "
+            "private meaning guidance while preferring faithful, concise, natural summaries."
+        },
+    )
+    opsd_loss_weight: float = field(
+        default=1.0,
+        metadata={"help": "Weight for the on-policy OPSD distillation loss."},
+    )
+    sft_loss_weight: float = field(
+        default=0.0,
+        metadata={
+            "help": "Weight for supervised cross-entropy loss on input/output targets. "
+            "This directly trains output tokens plus EOS and helps anchor short-answer format."
+        },
+    )
+
+
+def load_model_for_training(model_args, model_kwargs, model_loader: str = "auto"):
+    """Load text-only and image-text Qwen-family models with the right AutoModel class."""
+    from transformers import AutoConfig, AutoModelForCausalLM
+
+    loader = (model_loader or "auto").lower()
+    valid_loaders = {"auto", "causal_lm", "image_text_to_text"}
+    if loader not in valid_loaders:
+        raise ValueError(f"model_loader must be one of {sorted(valid_loaders)}, got: {model_loader}")
+
+    config = AutoConfig.from_pretrained(
+        model_args.model_name_or_path,
+        revision=model_args.model_revision,
+        trust_remote_code=model_args.trust_remote_code,
+    )
+
+    archs = list(getattr(config, "architectures", []) or [])
+    has_vision_config = getattr(config, "vision_config", None) is not None
+    prefers_image_text = has_vision_config or any("ForConditionalGeneration" in arch for arch in archs)
+
+    def get_image_text_loader():
+        try:
+            from transformers import AutoModelForImageTextToText
+
+            return AutoModelForImageTextToText
+        except ImportError as exc:
+            raise ImportError(
+                "AutoModelForImageTextToText is not available in this transformers install. "
+                "Qwen3.5 requires a recent transformers build; the model README recommends "
+                "`pip install \"transformers[serving] @ git+https://github.com/huggingface/transformers.git@main\"`."
+            ) from exc
+
+    if loader == "causal_lm":
+        loader_plan = [("AutoModelForCausalLM", AutoModelForCausalLM)]
+    elif loader == "image_text_to_text":
+        loader_plan = [("AutoModelForImageTextToText", get_image_text_loader)]
+    elif prefers_image_text:
+        loader_plan = [
+            ("AutoModelForImageTextToText", get_image_text_loader),
+            ("AutoModelForCausalLM", AutoModelForCausalLM),
+        ]
+    else:
+        loader_plan = [
+            ("AutoModelForCausalLM", AutoModelForCausalLM),
+            ("AutoModelForImageTextToText", get_image_text_loader),
+        ]
+
+    failures = []
+    for loader_name, loader_or_factory in loader_plan:
+        try:
+            loader_cls = (
+                loader_or_factory()
+                if callable(loader_or_factory) and not hasattr(loader_or_factory, "from_pretrained")
+                else loader_or_factory
+            )
+            print(f"Loading model with {loader_name}")
+            model = loader_cls.from_pretrained(model_args.model_name_or_path, **model_kwargs)
+            if not getattr(model.config, "_name_or_path", None):
+                model.config._name_or_path = model_args.model_name_or_path
+            return model
+        except Exception as exc:
+            failures.append(f"{loader_name}: {type(exc).__name__}: {exc}")
+            if loader != "auto":
+                break
+
+    joined = "\n".join(failures)
+    raise RuntimeError(f"Could not load model {model_args.model_name_or_path}.\n{joined}")
+
+
+def load_opsd_dataset(script_args):
+    """Load the OPSD training dataset from Hugging Face or a local data file."""
+    from pathlib import Path
+
+    dataset_ref = script_args.opsd_dataset
+    dataset_path = Path(dataset_ref).expanduser()
+    split = script_args.opsd_dataset_split
+
+    if dataset_path.exists():
+        if dataset_path.is_file():
+            suffix = dataset_path.suffix.lower()
+            if suffix in {".json", ".jsonl"}:
+                return load_dataset("json", data_files=str(dataset_path), split=split)
+            if suffix == ".csv":
+                return load_dataset("csv", data_files=str(dataset_path), split=split)
+            raise ValueError(
+                f"Unsupported local dataset file extension: {suffix}. Use .json, .jsonl, or .csv."
+            )
+        return load_dataset(str(dataset_path), split=split)
+
+    return load_dataset(dataset_ref, split=split)
 
 
 if __name__ == "__main__":
@@ -195,6 +372,12 @@ if __name__ == "__main__":
                 "top_k_loss": script_args.top_k_loss if script_args.top_k_loss > 0 else None,
                 "use_ema_teacher": script_args.use_ema_teacher,
                 "ema_decay": script_args.ema_decay if script_args.use_ema_teacher else None,
+                "opsd_loss_weight": script_args.opsd_loss_weight,
+                "sft_loss_weight": script_args.sft_loss_weight,
+                "teacher_guidance_mode": script_args.teacher_guidance_mode,
+                "corrector_mode": script_args.corrector_mode,
+                "draft_field": script_args.draft_field if script_args.corrector_mode else None,
+                "teacher_draft_field": script_args.teacher_draft_field or None,
             },
         )
 
@@ -227,12 +410,14 @@ if __name__ == "__main__":
     print(f"Using attention implementation: {model_args.attn_implementation or 'flash_attention_2'}")
     print(f"{'='*80}\n")
 
+    # Keep training forwards from materializing KV cache. Generation methods
+    # temporarily enable cache around model.generate() and restore this value.
+    model_use_cache = False
     model_kwargs = dict(
         revision=model_args.model_revision,
         trust_remote_code=model_args.trust_remote_code,
         attn_implementation=model_args.attn_implementation or "flash_attention_2",
         torch_dtype=model_dtype,
-        use_cache=False if training_args.gradient_checkpointing else True,
     )
     quantization_config = get_quantization_config(model_args)
     if quantization_config is not None:
@@ -263,11 +448,15 @@ if __name__ == "__main__":
     # Add presence_penalty to training_args so it can be accessed in the trainer
     training_args.presence_penalty = script_args.presence_penalty
 
-    dataset = load_dataset("siyanzhao/Openthoughts_math_30k_opsd")
-    train_dataset = dataset["train"]
+    train_dataset = load_opsd_dataset(script_args)
+
+    model = load_model_for_training(model_args, model_kwargs, script_args.model_loader)
+    model.config.use_cache = model_use_cache
+    if getattr(model, "generation_config", None) is not None:
+        model.generation_config.use_cache = model_use_cache
 
     trainer = OPSDTrainer(
-        model=model_args.model_name_or_path,
+        model=model,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=None,
@@ -282,9 +471,23 @@ if __name__ == "__main__":
         ema_decay=script_args.ema_decay,
         student_thinking=script_args.student_thinking,
         teacher_thinking=script_args.teacher_thinking,
+        close_teacher_thinking_before_scoring=script_args.close_teacher_thinking_before_scoring,
+        reapply_chat_template_to_input=script_args.reapply_chat_template_to_input,
+        problem_field=script_args.problem_field,
+        solution_field=script_args.solution_field,
+        input_field=script_args.input_field,
+        output_field=script_args.output_field,
+        draft_field=script_args.draft_field,
+        corrector_mode=script_args.corrector_mode,
+        teacher_draft_field=script_args.teacher_draft_field,
+        opsd_loss_weight=script_args.opsd_loss_weight,
+        sft_loss_weight=script_args.sft_loss_weight,
+        teacher_guidance_mode=script_args.teacher_guidance_mode,
     )
 
     if training_args.eval_strategy != "no":
+        from trl import LogCompletionsCallback
+
         generation_config = GenerationConfig(
             max_new_tokens=training_args.max_completion_length,
             do_sample=True,

@@ -1,3 +1,7 @@
 __pycache__/
 *.py[cod]
 *$py.class
+.venv/
+tmp/
+outputs/
+eval_results/
