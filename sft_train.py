@@ -130,7 +130,7 @@ if __name__ == "__main__":
 
     dataset = load_dataset("siyanzhao/Openthoughts_math_30k_opsd")
     train_dataset = dataset["train"]
-    train_dataset = train_dataset.map(make_format_fn(tokenizer))
+    train_dataset = train_dataset.map(make_format_fn(tokenizer), remove_columns=train_dataset.column_names)
 
     # Take 1% of train for evaluation if no eval split exists
     split_dataset = train_dataset.train_test_split(test_size=0.01, seed=42)
