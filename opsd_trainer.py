@@ -231,6 +231,20 @@ class OPSDTrainer(SFTTrainer):
         self._off_policy_loss_total = 0.0
         self._on_policy_step_equiv = 0.0
         self._off_policy_step_equiv = 0.0
+        self._entropy_stats = {
+            "train": {
+                "student_sum": 0.0,
+                "student_count": 0.0,
+                "teacher_sum": 0.0,
+                "teacher_count": 0.0,
+            },
+            "eval": {
+                "student_sum": 0.0,
+                "student_count": 0.0,
+                "teacher_sum": 0.0,
+                "teacher_count": 0.0,
+            },
+        }
 
         self.use_transformers_paged = args.use_transformers_paged or False
 
@@ -478,6 +492,21 @@ class OPSDTrainer(SFTTrainer):
         else:
             return jsd
 
+    @staticmethod
+    def _token_entropy_stats_from_log_probs(log_probs, labels=None):
+        """Return the summed token entropies and valid-token count for logging."""
+        token_entropy = -(log_probs.exp() * log_probs).sum(dim=-1)
+
+        if labels is not None:
+            mask = labels != -100
+            token_entropy = token_entropy[mask]
+            token_count = mask.sum()
+        else:
+            token_count = torch.tensor(token_entropy.numel(), device=token_entropy.device)
+            token_entropy = token_entropy.reshape(-1)
+
+        return token_entropy.sum().detach(), token_count.detach()
+
     def _update_ema(self):
         """Update EMA parameters after an optimizer step.
 
@@ -630,6 +659,7 @@ class OPSDTrainer(SFTTrainer):
         Memory optimization: Extract only needed log-probs immediately and free large tensors.
         """
         # Get batch-level prompt lengths
+        mode = "train" if model.training else "eval"
         student_prompt_len = inputs["student_prompt_length"]
         teacher_prompt_len = inputs["teacher_prompt_length"]
         sampled_token_ids = inputs["student_input_ids"][:, student_prompt_len:]
@@ -647,6 +677,10 @@ class OPSDTrainer(SFTTrainer):
         if self.use_thinking_machines_loss:
             # For reverse KL, we only need log-probs of sampled tokens
             student_log_probs = F.log_softmax(student_logits / self.temperature, dim=-1)
+            with torch.no_grad():
+                student_entropy_sum, student_entropy_count = self._token_entropy_stats_from_log_probs(
+                    student_log_probs.detach(), shifted_labels
+                )
             student_log_probs_sampled = torch.gather(
                 student_log_probs, dim=-1, index=sampled_token_ids.unsqueeze(-1)
             ).squeeze(-1)
@@ -654,6 +688,12 @@ class OPSDTrainer(SFTTrainer):
         else:
             # For JSD, keep logits (temperature will be applied in generalized_jsd_loss)
             student_logits_for_loss = student_logits
+            with torch.no_grad():
+                student_log_probs_for_entropy = F.log_softmax(student_logits.detach() / self.temperature, dim=-1)
+                student_entropy_sum, student_entropy_count = self._token_entropy_stats_from_log_probs(
+                    student_log_probs_for_entropy, shifted_labels
+                )
+                del student_log_probs_for_entropy
             del student_logits
 
         # Free the full outputs (but keep reference for return_outputs if needed)
@@ -690,16 +730,30 @@ class OPSDTrainer(SFTTrainer):
 
             if self.use_thinking_machines_loss:
                 teacher_log_probs = F.log_softmax(teacher_logits / self.temperature, dim=-1)
+                teacher_entropy_sum, teacher_entropy_count = self._token_entropy_stats_from_log_probs(
+                    teacher_log_probs, shifted_labels
+                )
                 teacher_log_probs_sampled = torch.gather(
                     teacher_log_probs, dim=-1, index=sampled_token_ids.unsqueeze(-1)
                 ).squeeze(-1)
                 del teacher_logits, teacher_log_probs  # Free immediately!
             else:
                 teacher_logits_for_loss = teacher_logits
+                teacher_log_probs_for_entropy = F.log_softmax(teacher_logits / self.temperature, dim=-1)
+                teacher_entropy_sum, teacher_entropy_count = self._token_entropy_stats_from_log_probs(
+                    teacher_log_probs_for_entropy, shifted_labels
+                )
+                del teacher_log_probs_for_entropy
                 del teacher_logits
 
             del outputs_teacher
             empty_cache()
+
+        entropy_stats = self._entropy_stats[mode]
+        entropy_stats["student_sum"] += float(student_entropy_sum)
+        entropy_stats["student_count"] += float(student_entropy_count)
+        entropy_stats["teacher_sum"] += float(teacher_entropy_sum)
+        entropy_stats["teacher_count"] += float(teacher_entropy_count)
 
         # === COMPUTE LOSS with only small tensors ===
         if self.use_thinking_machines_loss:
@@ -1465,9 +1519,42 @@ class OPSDTrainer(SFTTrainer):
         metrics = {
             key: sum(val) / len(val) for key, val in self._metrics[mode].items()
         }  # average the metrics
+        entropy_logs = {}
+        device = self.accelerator.device if hasattr(self.accelerator, "device") else torch.device("cpu")
+        entropy_stats = self._entropy_stats[mode]
+        entropy_vec = torch.tensor(
+            [
+                entropy_stats["student_sum"],
+                entropy_stats["student_count"],
+                entropy_stats["teacher_sum"],
+                entropy_stats["teacher_count"],
+            ],
+            dtype=torch.float64,
+            device=device,
+        )
+
+        if (
+            getattr(self.accelerator, "distributed_type", DistributedType.NO) != DistributedType.NO
+            and dist.is_available()
+            and dist.is_initialized()
+        ):
+            dist.all_reduce(entropy_vec, op=dist.ReduceOp.SUM)
+
+        (
+            student_entropy_sum,
+            student_entropy_count,
+            teacher_entropy_sum,
+            teacher_entropy_count,
+        ) = entropy_vec.tolist()
+
+        if student_entropy_count > 0:
+            entropy_logs["student_token_entropy"] = round(student_entropy_sum / student_entropy_count, 4)
+        if teacher_entropy_count > 0:
+            entropy_logs["teacher_student_rollout_token_entropy"] = round(
+                teacher_entropy_sum / teacher_entropy_count, 4
+            )
 
         if mode == "train":
-            device = self.accelerator.device if hasattr(self.accelerator, "device") else torch.device("cpu")
             # Track on/off-policy loss statistics
             vec = torch.tensor(
                 [
@@ -1510,10 +1597,17 @@ class OPSDTrainer(SFTTrainer):
         # start with "eval_". We need to add the prefix "eval_" to the keys in `metrics` to match the format.
         if mode == "eval":
             metrics = {f"eval_{key}": val for key, val in metrics.items()}
+            entropy_logs = {f"eval_{key}": val for key, val in entropy_logs.items()}
 
-        logs = {**logs, **metrics}
+        logs = {**logs, **entropy_logs, **metrics}
         super().log(logs, start_time)
         self._metrics[mode].clear()
+        self._entropy_stats[mode] = {
+            "student_sum": 0.0,
+            "student_count": 0.0,
+            "teacher_sum": 0.0,
+            "teacher_count": 0.0,
+        }
 
         if (
             self.accelerator.is_main_process
